@@ -3,11 +3,11 @@
 Import -> Scan photos -> Review (confirm each draft against its source) -> History/trends.
 """
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -28,28 +28,55 @@ ROOT = Path(__file__).parent
 DB_PATHS = {"sample": ROOT / "data" / "demo.db",
             "export": ROOT / "data" / "health.db",
             "whatsapp": ROOT / "data" / "health.db"}
-SOURCES = {"Chat export file (recommended)": "export",
-           "Sample export (fictional)": "sample",
+SOURCES = {"Chat export (recommended)": "export",
+           "Sample data (fictional)": "sample",
            "WhatsApp Web (experimental)": "whatsapp"}
+# One quiet palette, reused for every chart.
+CHART_COLORS = {"bp": ["#2F6F6B", "#C9A66B"], "pulse": ["#B5654A"],
+                "glucose": ["#5B7DB1"], "weight": ["#7A8F5C"]}
 WEIGHT_UNITS = ["", "kg", "lb"]
 GLUCOSE_UNITS = ["", "mg/dL", "mmol/L"]
 
 st.set_page_config(page_title="Health Log", layout="wide")
-st.title("Health readings from WhatsApp")
-st.caption("Local-only. Use fictional data for demos. Not medical advice.")
+st.markdown("""
+<style>
+.block-container {max-width: 1080px; padding-top: 2.4rem; padding-bottom: 4rem;}
+h1, h2, h3, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {
+    font-family: ui-serif, "New York", Georgia, serif !important; font-weight: 600 !important;
+    letter-spacing: -0.01em !important;}
+h1 {font-size: 2.4rem !important; margin-bottom: 0;}
+h2, h3 {font-size: 1.4rem !important;}
+footer, #MainMenu {visibility: hidden;}
+[data-testid="stSidebar"] {border-right: 1px solid #E6E0D6;}
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stForm"] {
+    border-color: #E4DDD1 !important; border-radius: 14px; background-color: #FFFFFF !important;}
+[data-testid="stMetricLabel"] p {font-size: 0.85rem; color: #6B7773; letter-spacing: 0.02em;}
+[data-testid="stMetricValue"] {font-family: ui-serif, "New York", Georgia, serif; font-size: 2rem;}
+.stTabs [data-baseweb="tab-list"] {gap: 1.8rem; border-bottom: 1px solid #E4DDD1;}
+.stTabs [data-baseweb="tab"] {font-size: 1rem; padding: 0.6rem 0;}
+.stButton button, .stDownloadButton button {border-radius: 10px; font-weight: 500;}
+</style>
+""", unsafe_allow_html=True)
+st.title("Health Log")
+st.caption("Blood pressure, glucose and weight from the family chat. "
+           "Everything stays on this computer. For record-keeping, not medical advice.")
 
 with st.sidebar:
-    source_key = SOURCES[st.radio("Source", list(SOURCES))]
+    st.markdown("### Source")
+    source_key = SOURCES[st.radio("Where the messages come from", list(SOURCES),
+                                  label_visibility="collapsed")]
     export_path = chat_name = ""
     limit = 30
     if source_key == "export":
         export_path = st.text_input(
-            "Path to the export (.zip, folder, or _chat.txt)",
-            help="On a Mac: right-click the file, hold Option, choose 'Copy as Pathname'.")
+            "Location of the export",
+            placeholder="~/Downloads/WhatsApp Chat.zip",
+            help="A .zip, a folder, or _chat.txt. On a Mac: right-click the file, "
+                 "hold Option, choose 'Copy as Pathname'.")
     elif source_key == "whatsapp":
         chat_name = st.text_input("Conversation name (exact title)")
         limit = st.number_input("Max messages", 5, 200, 30)
-    st.caption(f"Database: data/{DB_PATHS[source_key].name}")
+    st.caption(f"Saved in data/{DB_PATHS[source_key].name}")
 
 conn = db.connect(DB_PATHS[source_key])
 
@@ -66,12 +93,16 @@ def media_store():
 
 if source_key == "sample" and st.sidebar.button("Reset demo data"):
     db.clear_messages(conn)
-    st.sidebar.success("Demo data cleared (messages and readings).")
+    st.sidebar.success("Sample data cleared.")
 
 
 # ------------------------------------------------------------------ Import tab
 def import_tab():
-    if not st.button("Sync" if source_key == "whatsapp" else "Import", type="primary"):
+    st.subheader("Messages")
+    if source_key == "export":
+        st.caption("Export the chat from WhatsApp with **Attach Media**, paste its location in the "
+                   "sidebar, then import. Importing again later only adds what's new.")
+    if not st.button("Sync" if source_key == "whatsapp" else "Import chat", type="primary"):
         return
     messages, parsed = None, None
     try:
@@ -79,7 +110,7 @@ def import_tab():
             parsed = load_sample()
         elif source_key == "export":
             if not export_path.strip():
-                st.error("Enter the path to your export first.")
+                st.error("Add the location of the export in the sidebar first.")
             else:
                 clean = clean_path(export_path)
                 parsed = parse_chat(read_chat_text(Path(clean)))
@@ -105,25 +136,26 @@ def import_tab():
     if parsed is not None:
         messages = parsed.messages
         if not parsed.date_order_certain:
-            st.warning("Every date in this file was ambiguous, so I assumed month/day/year. "
-                       "Check the dates in the table.")
+            st.warning("Every date in this file could be read two ways (like 3/4/26), so month first "
+                       "was assumed. Check the dates in the table below.")
     if messages is not None:
         r = db.insert_messages(conn, source_key, messages)
-        st.success(f"{r.new} new, {r.updated} completed, {r.duplicate} already imported.")
+        st.success(f"{r.new} new  ·  {r.updated} updated  ·  {r.duplicate} already here")
         if r.skipped:
-            st.warning(f"{r.skipped} message(s) hadn't finished loading in WhatsApp Web "
-                       "and were skipped. Click Sync again.")
+            st.warning(f"{r.skipped} message(s) hadn't finished loading and were skipped. "
+                       "Click Sync again.")
         if parsed is not None and parsed.ignored:
-            st.caption("Left out: " + ", ".join(f"{n:,} {k}" for k, n in parsed.ignored.items()))
+            st.caption("Skipped: " + ", ".join(f"{n:,} {k}" for k, n in parsed.ignored.items()))
 
 
 def scan_section():
-    """Read the numbers off photos. Libre screenshots and BP monitor displays are read on this
-    computer for free; the Claude reader is an optional paid fallback for photos they decline."""
+    """Read the numbers off photos. Libre screenshots and blood pressure monitor displays are
+    read on this computer; nothing is uploaded anywhere."""
     st.subheader("Photos")
     if not bp_reader_available():
-        st.error("Blood pressure photos can't be read yet: OpenCV isn't installed. In the terminal, run "
-                 "`pip install -r requirements.txt`, then restart the app. Glucose screenshots still work.")
+        st.error("Blood pressure photos can't be read yet because OpenCV isn't installed. "
+                 "Run `pip install -r requirements.txt` in the terminal, then restart the app. "
+                 "Glucose screenshots still work.")
     media = media_store()
     if media is None or len(media) == 0:
         st.caption("No photo files found. Import a chat export made with **Attach Media** "
@@ -136,46 +168,33 @@ def scan_section():
     since = c2.text_input("Only photos since (optional)", placeholder="2026-06-01")
     todo = [r for r in db.photos_to_scan(conn, source_key, chosen or None, since.strip() or None)
             if media.has(r["attachment"])]
-    st.caption(f"{len(todo):,} photo(s) not scanned yet, found in the export.")
+    st.caption(f"{len(todo):,} photo(s) waiting to be scanned.")
 
-    use_cloud = st.checkbox(
-        "Optional: also try photos the local readers can't read with Claude (paid; sends each photo to Anthropic)",
-        help="Not needed for FreeStyle Libre screenshots or Omron-style blood pressure monitor photos, "
-             "which are read on this computer for free. Needs ANTHROPIC_API_KEY.")
-    if use_cloud and not os.environ.get("ANTHROPIC_API_KEY"):
-        st.warning("Set the ANTHROPIC_API_KEY environment variable before starting the app.")
-        use_cloud = False
-    if use_cloud and len(todo) > 50 and not chosen:
-        st.warning("That is a lot of photos. Pick the sender and a start date so only readings are sent.")
-    if st.button("Scan photos", disabled=not todo or (use_cloud and len(todo) > 50 and not chosen)):
-        cloud = None
-        if use_cloud:
-            from health_tracker.vision import ClaudeVisionExtractor
-            cloud = ClaudeVisionExtractor()
+    if st.button("Scan photos", disabled=not todo):
         bar = st.progress(0.0)
         try:
-            res = scan_photos(conn, source_key, media, todo, cloud,
+            res = scan_photos(conn, source_key, media, todo, None,
                               progress=lambda i, n: bar.progress(i / max(n, 1)))
         except BpReaderUnavailable as e:
             st.error(str(e))
             return
+        bar.empty()
         st.success(f"Read {res.scanned} photo(s); {res.with_values} contained a reading. "
-                   "Go to **Review** to confirm them.")
+                   "Open **Review** to confirm them.")
         if res.not_read:
-            st.info(f"{res.not_read} photo(s) weren't recognised as a Libre screenshot or a blood pressure "
-                    "monitor display (food, family photos, or too blurry/angled to read safely). "
-                    "They are left alone and can be entered by hand if needed.")
-        if res.stopped_early:
-            st.error("Stopped after repeated errors (check your API key / connection). Click Scan again.")
-        elif res.errors:
+            st.info(f"{res.not_read} photo(s) weren't a Libre screenshot or a clear blood pressure "
+                    "display (food, family photos, or too blurry or angled to read safely), "
+                    "so they were left alone.")
+        if res.errors:
             st.warning(f"{res.errors} photo(s) failed and can be retried.")
 
 
 def messages_table():
     rows = db.list_messages(conn, source_key)
     if not rows:
-        st.write("Nothing stored yet. Click **Import**.")
+        st.caption("Nothing imported yet.")
         return
+    st.subheader("Imported messages")
     show = st.radio("Show", ["Typed messages", "Photos", "All"], horizontal=True)
     df = pd.DataFrame([dict(r) for r in rows])
     df["has_image"] = df["has_image"].astype(bool)
@@ -184,14 +203,18 @@ def messages_table():
     elif show == "Photos":
         df = df[df["has_image"]]
     st.caption(f"{len(df):,} messages shown ({len(rows):,} stored)")
-    st.dataframe(df[["sent_at", "sender", "text", "attachment", "has_image", "review_status"]],
-                 width="stretch")
+    table = df[["sent_at", "sender", "text", "attachment", "review_status"]].rename(columns={
+        "sent_at": "Sent", "sender": "From", "text": "Message", "attachment": "Photo",
+        "review_status": "Status"})
+    st.dataframe(table, width="stretch", hide_index=True)
 
 
 # ------------------------------------------------------------------ Review tab
-def reading_form(key: str, draft: DraftReading, row=None):
+def reading_form(key: str, draft: DraftReading, row=None, title: str = ""):
     """One editable form. With a source message it also offers Discard and Skip."""
     with st.form(key, clear_on_submit=row is None):
+        if title:
+            st.markdown(f"**{title}**")
         c1, c2 = st.columns(2)
         person = c1.text_input("Whose reading (optional)", key=f"{key}-person",
                                value=st.session_state.get("last_person", ""))
@@ -211,7 +234,7 @@ def reading_form(key: str, draft: DraftReading, row=None):
                                     index=GLUCOSE_UNITS.index(draft.glucose_unit or ""))
         note = st.text_input("Note (optional)", key=f"{key}-note")
         b1, b2, b3 = st.columns(3)
-        save = b1.form_submit_button("Confirm and save", type="primary")
+        save = b1.form_submit_button("Save reading", type="primary")
         discard = b2.form_submit_button("Not a reading") if row else False
         skip = b3.form_submit_button("Skip for now") if row else False
 
@@ -227,7 +250,7 @@ def reading_form(key: str, draft: DraftReading, row=None):
         if not db.add_reading(conn, row["id"] if row else None, reading):
             st.warning("That message already has a saved reading.")
         st.session_state["last_person"] = person
-        st.session_state["flash"] = "Saved."
+        st.session_state["flash"] = "Reading saved."
         st.rerun()
     if discard:
         db.set_review_status(conn, row["id"], "discarded")
@@ -243,7 +266,7 @@ def bulk_weight_section():
     safe, look = bulk_weight_candidates(pending, parse_reading)
     if not safe:
         return
-    with st.expander(f"Bulk-confirm weight messages ({len(safe)} look clean, {len(look)} need a look)"):
+    with st.expander(f"Confirm weight messages in bulk  ({len(safe)} look clean, {len(look)} need a closer look)"):
         st.write("Only messages that are **just a weight with a stated unit**, with no warnings and a "
                  "value near the usual one, are listed. Anything odd stays in the one-by-one queue below.")
         preview = pd.DataFrame([{"message time": r["sent_at"] or r["sent_at_raw"], "message": r["text"],
@@ -266,7 +289,7 @@ def bulk_weight_section():
 def review_tab():
     if flash := st.session_state.pop("flash", None):
         st.success(flash)
-    with st.expander("Manual entry (no source message)"):
+    with st.expander("Add a reading by hand"):
         reading_form("manual", DraftReading())
     bulk_weight_section()
 
@@ -281,17 +304,17 @@ def review_tab():
             continue
         queue.append((row, ImageDraft(**ex).to_draft(), True))
     queue.sort(key=lambda t: (t[0]["sent_at"] or "", t[0]["id"]), reverse=True)
-    st.caption(f"{len(queue)} item(s) with possible readings waiting. "
-               f"{len(skipped)} skipped this session.")
+    st.subheader("To review")
+    st.caption(f"{len(queue)} waiting" + (f"  ·  {len(skipped)} skipped for now" if skipped else ""))
     if not queue:
-        st.info("Nothing to review. Import messages (and scan photos) first, or everything is done.")
+        st.info("All caught up. Import messages and scan photos to find more.")
         return
 
     row, draft, is_photo = queue[0]
-    st.info("These values are suggestions read automatically. "
-            "Compare them with the source, fix anything wrong, and clear anything you're unsure of.")
-    left, right = st.columns([2, 3])
-    with left:
+    st.caption("These numbers were read automatically. Check them against the source, "
+               "fix anything wrong, and clear anything you're unsure of.")
+    left, right = st.columns([2, 3], gap="medium")
+    with left, st.container(border=True):
         if is_photo:
             st.markdown("**Source photo**")
             media = media_store()
@@ -304,19 +327,60 @@ def review_tab():
             st.markdown("**Source message**")
             st.text_area("Message text", row["text"], disabled=True, height=140,
                          key=f"src-{row['id']}", label_visibility="collapsed")
-        st.caption(f"From {row['sender']} · message time {row['sent_at_raw']}")
+        st.caption(f"From {row['sender']}  ·  sent {row['sent_at_raw']}")
         for n in draft.notes:
             st.warning(n)
     with right:
-        st.markdown("**Reading (edit, then confirm)**")
-        reading_form(f"msg-{row['id']}", draft, row)
+        reading_form(f"msg-{row['id']}", draft, row, title="Reading")
 
 
 # ------------------------------------------------------------------ History tab
+def _find(stats: dict, prefix: str):
+    return next((v for k, v in stats.items() if k.startswith(prefix)), None)
+
+
+def summary_cards(stats: dict):
+    """Latest value per measure with a plain caption. Descriptive only: no colours, arrows or verdicts."""
+    cards = []
+    sys_, dia = _find(stats, "Systolic"), _find(stats, "Diastolic")
+    if sys_ and dia:
+        cards.append(("Blood pressure", f"{sys_['last']:.0f}/{dia['last']:.0f}",
+                      f"average {sys_['mean']:.0f}/{dia['mean']:.0f}", f"{sys_['n']} readings"))
+    if pulse := _find(stats, "Pulse"):
+        cards.append(("Pulse", f"{pulse['last']:.0f}", f"average {pulse['mean']:.0f}", f"{pulse['n']} readings"))
+    if glu := _find(stats, "Glucose"):
+        cards.append(("Glucose (mg/dL)", f"{glu['last']:.0f}", f"average {glu['mean']:.0f}", f"{glu['n']} readings"))
+    if wt := _find(stats, "Weight"):
+        unit = next(k for k in stats if k.startswith("Weight")).split("(")[1].rstrip(")")
+        cards.append((f"Weight ({unit})", f"{wt['last']:g}", f"first {wt['first']:g}", f"{wt['n']} readings"))
+    if not cards:
+        return
+    for col, (label, value, line1, line2) in zip(st.columns(len(cards), gap="small"), cards):
+        with col, st.container(border=True):
+            st.metric(label, value)
+            st.caption(f"{line1}  \n{line2}")
+
+
+def trend_chart(long: pd.DataFrame, colors: list):
+    """Lines through the days a measure was taken, with a dot on each, so sparse data still reads."""
+    names = list(dict.fromkeys(long["series"]))
+    base = alt.Chart(long).encode(
+        x=alt.X("day:T", title=None, axis=alt.Axis(format="%b %d", labelColor="#6B7773", grid=False)),
+        y=alt.Y("value:Q", title=None, scale=alt.Scale(zero=False, nice=True),
+                axis=alt.Axis(labelColor="#6B7773", gridColor="#EEE8DE")),
+        color=alt.Color("series:N", scale=alt.Scale(domain=names, range=colors[:len(names)]),
+                        legend=alt.Legend(orient="bottom", title=None, labelColor="#6B7773") if len(names) > 1 else None),
+        tooltip=[alt.Tooltip("day:T", title="Day", format="%b %d, %Y"), "series:N",
+                 alt.Tooltip("value:Q", title="Value", format=".1f")])
+    chart = (base.mark_line(strokeWidth=2) + base.mark_point(filled=True, size=45)).properties(height=210)
+    st.altair_chart(chart.configure_view(strokeWidth=0), width="stretch")
+
+
 def history_tab():
     rows = db.list_readings(conn)
     if not rows:
-        st.write("No confirmed readings yet.")
+        st.subheader("History")
+        st.caption("No saved readings yet. Confirm some in Review and they will show up here.")
         return
     df = pd.DataFrame([dict(r) for r in rows])
     df["time basis"] = df["measured_at"].map(lambda v: "measured" if pd.notna(v) and v else "message time")
@@ -325,50 +389,58 @@ def history_tab():
 
     frame = trends.readings_frame(rows)
     people = sorted({p for p in df["person"].dropna() if p})
-    who = st.selectbox("Person", ["Everyone"] + people) if people else "Everyone"
+    f1, f2 = st.columns([1, 2])
+    who = f1.selectbox("Person", ["Everyone"] + people) if people else "Everyone"
+    window = f2.radio("Period", ["30 days", "90 days", "1 year", "All"], horizontal=True, index=1)
     if who != "Everyone":
         frame = frame[frame["person"] == who]
         df = df[df["person"] == who]
-
-    st.subheader("Trends")
-    window = st.radio("Period", ["30 days", "90 days", "1 year", "All"], horizontal=True, index=1)
     days = {"30 days": 30, "90 days": 90, "1 year": 365, "All": None}[window]
     view = frame if days is None else frame[frame["when"] >= frame["when"].max() - pd.Timedelta(days=days)]
+
+    st.subheader("Overview")
     if view.empty:
         st.info("No readings in this period.")
     else:
         stats = trends.summarize(view)
-        st.dataframe(pd.DataFrame(stats).T.rename(columns={
-            "n": "readings", "first": "first", "last": "latest", "min": "lowest",
-            "max": "highest", "mean": "average"}).round(1), width="stretch")
+        summary_cards(stats)
         day = trends.daily(view)
-        for title, columns in (("Blood pressure (mmHg)", ["systolic", "diastolic"]),
-                               ("Pulse (/min)", ["pulse"]),
-                               ("Glucose (mg/dL)", ["glucose_mgdl"]),
-                               ("Weight", [c for c in day.columns if c.startswith("weight_")])):
-            cols_present = [c for c in columns if c in day.columns and day[c].notna().any()]
-            if cols_present:
-                st.markdown(f"**{title}**")
-                st.line_chart(day[cols_present], height=220)
-        st.caption("Daily averages. Weight uses the most common unit in the data; readings with "
-                   "no stated unit are left out of the weight chart. Shows measurements only, no medical judgment.")
+        weight_col = next((c for c in day.columns if c.startswith("weight_")), None)
+        charts = (("Blood pressure (mmHg)", {"systolic": "Systolic", "diastolic": "Diastolic"}, "bp"),
+                  ("Pulse (per minute)", {"pulse": "Pulse"}, "pulse"),
+                  ("Glucose (mg/dL)", {"glucose_mgdl": "Glucose"}, "glucose"),
+                  ("Weight", {weight_col: "Weight"} if weight_col else {}, "weight"))
+        for title, labels, palette in charts:
+            long = trends.series_long(day, labels)
+            if not long.empty:
+                with st.container(border=True):
+                    st.markdown(f"**{title}**")
+                    trend_chart(long, CHART_COLORS[palette])
+        st.caption("Daily averages. Weight uses the most common unit in the data, and readings with "
+                   "no stated unit are left out of that chart.")
+        with st.expander("Numbers behind the cards"):
+            st.dataframe(pd.DataFrame(stats).T.rename(columns={
+                "n": "readings", "first": "first", "last": "latest", "min": "lowest",
+                "max": "highest", "mean": "average"}).round(1), width="stretch")
 
     st.subheader("For the doctor")
     summary = trends.doctor_summary_markdown(frame, who if who != "Everyone" else "")
-    with st.expander("Preview summary"):
-        st.markdown(summary)
-    d1, d2 = st.columns(2)
-    d1.download_button("Download summary (.md)", summary, "health-summary.md", "text/markdown")
-    d2.download_button("Download all readings (.csv)", df[cols].to_csv(index=False),
-                       "health-readings.csv", "text/csv")
+    with st.container(border=True):
+        st.caption("A short summary of the readings, plus the full list as a spreadsheet.")
+        d1, d2, _ = st.columns([1, 1, 2])
+        d1.download_button("Download summary", summary, "health-summary.md", "text/markdown")
+        d2.download_button("Download all readings", df[cols].to_csv(index=False),
+                           "health-readings.csv", "text/csv")
+        with st.expander("Preview summary"):
+            st.markdown(summary)
 
-    st.subheader("All confirmed readings")
-    st.caption(f"{len(df)} confirmed reading(s). When no measurement time was entered, "
-               "the message time is shown and labelled as such.")
-    st.dataframe(df[cols], width="stretch")
+    st.subheader("All readings")
+    st.caption(f"{len(df)} saved. When no measurement time was entered, the message time is "
+               "shown and labelled as such.")
+    st.dataframe(df[cols], width="stretch", hide_index=True)
 
 
-tab_import, tab_review, tab_history = st.tabs(["1. Import", "2. Review", "3. History"])
+tab_import, tab_review, tab_history = st.tabs(["Import", "Review", "History"])
 with tab_import:
     import_tab()
     scan_section()

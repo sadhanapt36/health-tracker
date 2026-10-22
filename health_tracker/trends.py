@@ -102,3 +102,18 @@ def doctor_summary_markdown(df: pd.DataFrame, person: str = "") -> str:
         parts.append("\n".join(lines) + "\n")
     parts.append("\nThis summary shows measurements only and makes no medical judgment.\n")
     return "".join(parts)
+
+
+def series_long(day: pd.DataFrame, labels: dict) -> pd.DataFrame:
+    """Daily frame -> long rows (day, series, value) with only the days each series really has.
+
+    A line chart over a wide table with gaps draws nothing between isolated points, so a
+    measure taken every few days looked empty. Long form with the gaps removed connects them.
+    `labels` maps column name -> display name; columns that are absent or empty are skipped.
+    """
+    parts = []
+    for col, name in labels.items():
+        if col in day.columns and day[col].notna().any():
+            s = day[col].dropna()
+            parts.append(pd.DataFrame({"day": s.index, "series": name, "value": s.values}))
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["day", "series", "value"])

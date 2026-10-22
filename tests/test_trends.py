@@ -61,3 +61,22 @@ def test_doctor_summary_has_table_and_no_medical_judgment():
     assert "Grandpa" in md and "| Systolic (mmHg) |" in md and "Last 30 days" in md
     import re
     assert not re.search(r"\b(normal|high|low|dangerous|healthy|elevated)\b", md.lower())
+
+
+def test_sparse_series_keep_only_real_days_so_the_line_connects():
+    df = frame([
+        {"when": "2026-06-10T08:00", "systolic": 120, "diastolic": 80},
+        {"when": "2026-06-11T08:00", "weight": 146.0, "weight_unit": "lb"},
+        {"when": "2026-06-12T08:00", "systolic": 118, "diastolic": 78},
+        {"when": "2026-06-13T08:00", "weight": 145.6, "weight_unit": "lb"},
+    ])
+    long = trends.series_long(trends.daily(df), {"systolic": "Systolic", "diastolic": "Diastolic",
+                                                 "pulse": "Pulse", "weight_lb": "Weight"})
+    by = long.groupby("series")["value"].apply(list).to_dict()
+    assert by == {"Systolic": [120.0, 118.0], "Diastolic": [80.0, 78.0], "Weight": [146.0, 145.6]}
+    assert not long["value"].isna().any()          # no NaN rows left to break the line
+    assert "Pulse" not in by                       # a measure with no data is left out entirely
+
+
+def test_series_long_with_nothing_is_empty_not_an_error():
+    assert trends.series_long(trends.daily(frame([{"when": "2026-06-10", "pulse": 70}])), {"glucose_mgdl": "Glucose"}).empty

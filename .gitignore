@@ -1,0 +1,17 @@
+# Never commit: browser sessions, real messages/images, health records, secrets
+.browser_profile/
+data/
+images/
+exports/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Local clutter
+.DS_Store
+*.whl
+source/
