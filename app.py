@@ -58,8 +58,7 @@ footer, #MainMenu {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 st.title("Health Log")
-st.caption("Blood pressure, glucose and weight from the family chat. "
-           "Everything stays on this computer. For record-keeping, not medical advice.")
+st.caption("Weight, sugar and blood pressure tracking.")
 
 with st.sidebar:
     st.markdown("### Source")
